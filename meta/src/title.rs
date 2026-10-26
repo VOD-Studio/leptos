@@ -262,7 +262,9 @@ struct TitleView {
 struct TitleViewState {
     id: TitleId,
     meta: MetaContext,
-    // these are only Some(_) after being unmounted, and hold these values until dropped or remounted
+    // whether this title's entries are currently in the text and formatter stacks
+    mounted: bool,
+    // these are only Some(_) while not mounted, and hold these values until dropped or remounted
     formatter: Option<Formatter>,
     text: Option<TextProp>,
 }
@@ -289,17 +291,30 @@ impl Render for TitleView {
         TitleViewState {
             id,
             meta,
+            mounted: false,
             text,
             formatter,
         }
     }
 
-    fn rebuild(self, _state: &mut Self::State) {
-        self.meta.title.update_text_and_formatter(
-            self.id,
-            self.text,
-            self.formatter,
-        );
+    fn rebuild(self, state: &mut Self::State) {
+        // the retained state owns the stack entry, so the new values must replace the entry
+        // under the state's ID; pushing them under the new view's ID would leave an entry that
+        // nothing ever removes, and keep the state's old entry alive past this rebuild
+        let TitleView {
+            formatter, text, ..
+        } = self;
+        if state.mounted {
+            state
+                .meta
+                .title
+                .update_text_and_formatter(state.id, text, formatter);
+        } else {
+            // not in active use (e.g., inside a hidden <Suspense/>): hold the new values until
+            // the state is mounted again
+            state.text = text;
+            state.formatter = formatter;
+        }
     }
 }
 
@@ -359,6 +374,7 @@ impl RenderHtml for TitleView {
         TitleViewState {
             id,
             meta,
+            mounted: true,
             text: None,
             formatter: None,
         }
@@ -371,6 +387,7 @@ impl RenderHtml for TitleView {
 
 impl Mountable for TitleViewState {
     fn unmount(&mut self) {
+        self.mounted = false;
         let (text, formatter) = self.meta.title.remove_id(self.id);
         if text.is_some() {
             self.text = text;
@@ -390,6 +407,7 @@ impl Mountable for TitleViewState {
         //
         // "mounting" in this case means that we actually want this title to be in active use
         // as a result, we will push it into the title stack and revalidate
+        self.mounted = true;
         self.meta.title.push_text_and_formatter(
             self.id,
             self.text.take(),
@@ -403,5 +421,73 @@ impl Mountable for TitleViewState {
 
     fn elements(&self) -> Vec<leptos::tachys::renderer::types::Element> {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn title_view(meta: &MetaContext, text: &'static str) -> TitleView {
+        TitleView {
+            id: meta.title.next_id(),
+            meta: meta.clone(),
+            formatter: None,
+            text: Some(text.into()),
+        }
+    }
+
+    // the state a hydrated (or built and mounted) <Title/> is left in
+    fn mounted_state(meta: &MetaContext, text: &'static str) -> TitleViewState {
+        let view = title_view(meta, text);
+        meta.title.push_text_and_formatter(view.id, view.text, None);
+        TitleViewState {
+            id: view.id,
+            meta: meta.clone(),
+            mounted: true,
+            text: None,
+            formatter: None,
+        }
+    }
+
+    fn current(meta: &MetaContext) -> Option<String> {
+        meta.title.as_string().map(|title| title.to_string())
+    }
+
+    #[test]
+    fn rebuild_replaces_the_entry_owned_by_the_state() {
+        let meta = MetaContext::new();
+        let mut state = mounted_state(&meta, "Page A");
+
+        title_view(&meta, "Page B").rebuild(&mut state);
+        assert_eq!(current(&meta).as_deref(), Some("Page B"));
+
+        // unmounting the rebuilt title must not leave any of its values behind
+        state.unmount();
+        assert_eq!(current(&meta), None);
+        assert!(meta.title.text_stack.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dropping_a_rebuilt_title_clears_it() {
+        let meta = MetaContext::new();
+        let mut state = mounted_state(&meta, "Page A");
+        title_view(&meta, "Page B").rebuild(&mut state);
+        drop(state);
+        assert_eq!(current(&meta), None);
+    }
+
+    #[test]
+    fn rebuild_while_unmounted_waits_for_mount() {
+        let meta = MetaContext::new();
+        let mut state = mounted_state(&meta, "Page A");
+        state.unmount();
+
+        title_view(&meta, "Page B").rebuild(&mut state);
+        assert_eq!(current(&meta), None);
+        assert_eq!(
+            state.text.as_ref().map(|text| text.get().to_string()),
+            Some("Page B".to_string())
+        );
     }
 }
