@@ -59,6 +59,10 @@ default-features = true
 [build-dependencies]
 rustc_version = { workspace = true, default-features = true }
 
+[dev-dependencies]
+# SSR rendering in unit tests (e.g. nested route params) needs `tachys/ssr`.
+leptos = { workspace = true, features = ["ssr"] }
+
 [features]
 tracing = ["dep:tracing"]
 ssr = ["dep:percent-encoding"]

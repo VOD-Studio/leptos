@@ -675,15 +675,7 @@ where
             .unzip();
         let params_including_parents = {
             let params = params.clone();
-            ArcMemo::new({
-                move |_| {
-                    parent_params
-                        .iter()
-                        .flat_map(|params| params.get().into_iter())
-                        .chain(params.get())
-                        .collect::<ParamsMap>()
-                }
-            })
+            ArcMemo::new(move |_| merge_params(&parent_params, &params))
         };
         let matched_including_parents = {
             let matched = matched.clone();
@@ -902,14 +894,8 @@ where
                     };
                     let params_including_parents = {
                         let params = current.params.clone();
-                        ArcMemo::new({
-                            move |_| {
-                                parent_params
-                                    .iter()
-                                    .flat_map(|params| params.get().into_iter())
-                                    .chain(params.get())
-                                    .collect::<ParamsMap>()
-                            }
+                        ArcMemo::new(move |_| {
+                            merge_params(&parent_params, &params)
                         })
                     };
 
@@ -1075,6 +1061,27 @@ where
     }
 }
 
+/// Merges the already-decoded params of the parent routes and of this route.
+///
+/// Each route's `ParamsMap` was built from the raw path segments through
+/// `ParamsMap::insert`, which percent-decodes once. Collecting them again via
+/// `FromIterator` would decode a second time and turn a literal `%2B` in a
+/// path param into `+`, so the values are copied as-is.
+fn merge_params(
+    parents: &[ArcRwSignal<ParamsMap>],
+    own: &ArcRwSignal<ParamsMap>,
+) -> ParamsMap {
+    let mut merged = ParamsMap::new();
+    for (key, value) in parents
+        .iter()
+        .flat_map(|params| params.get().into_iter())
+        .chain(own.get())
+    {
+        merged.insert_decoded(key, value);
+    }
+    merged
+}
+
 fn top_level_outlet(outlets: &[RouteContext], outer_owner: &Owner) -> AnyView {
     let outlet = outlets.first().unwrap();
     let child = outlet.child.clone();
@@ -1109,4 +1116,45 @@ where
             view_fn(outer_owner.child())
         }
     })
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use crate::{
+        components::{Outlet, ParentRoute, Route, Router, Routes},
+        hooks::use_params_map,
+        location::RequestUrl,
+        ParamSegment, StaticSegment,
+    };
+    use leptos::prelude::*;
+
+    fn render_tag(url: &str) -> String {
+        Owner::new().with(|| {
+            provide_context(RequestUrl::new(url));
+            view! {
+                <Router>
+                    <Routes fallback=|| "not found">
+                        <ParentRoute path=StaticSegment("") view=Outlet>
+                            <Route
+                                path=(StaticSegment("tags"), ParamSegment("tag"))
+                                view=|| {
+                                    let params = use_params_map();
+                                    move || params.read().get("tag").unwrap_or_default()
+                                }
+                            />
+                        </ParentRoute>
+                    </Routes>
+                </Router>
+            }
+            .to_html()
+        })
+    }
+
+    #[test]
+    fn nested_path_params_are_decoded_exactly_once() {
+        // `%252B` decodes once to `%2B`; merging the parent params used to
+        // decode it a second time into `+`.
+        assert!(render_tag("/tags/a%252Bb").contains("a%2Bb"));
+        assert!(render_tag("/tags/C%2B%2B").contains("C++"));
+    }
 }

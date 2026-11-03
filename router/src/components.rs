@@ -154,9 +154,11 @@ impl RouterContext {
         let query_mutations =
             mem::take(&mut *self.query_mutations.write_value());
         if !query_mutations.is_empty() {
+            // Values come from `query_signal` setters as plain strings, not from
+            // a URL, so they must not be percent-decoded before re-encoding.
             for (key, value) in query_mutations {
                 if let Some(value) = value {
-                    url.search_params_mut().replace(key, value);
+                    url.search_params_mut().replace_decoded(key, value);
                 } else {
                     url.search_params_mut().remove(&key);
                 }
